@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+    <model name="project3">
+        <static>true</static>
+        <link name="link">
+            <pose>0 0 0 0 0 0</pose>
+            <visual name="visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://project3/meshes/map-project3-phase2.STL</uri>
+                        <scale>0.002 0.002 0.002</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://project3/meshes/map-project3-phase2.STL</uri>
+                        <scale>0.002 0.002 0.002</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+            <inertial>
+                <mass>1.0</mass>
+                <inertia>
+                    <ixx>0.01</ixx>
+                    <iyy>0.01</iyy>
+                    <izz>0.01</izz>
+                    <ixy>0.0</ixy>
+                    <ixz>0.0</ixz>
+                    <iyz>0.0</iyz>
+                </inertia>
+            </inertial>
+        </link>
+    </model>
+</sdf>
+
