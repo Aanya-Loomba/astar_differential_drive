@@ -8,15 +8,21 @@ WHEEL_RADIUS_MM = 33.0
 WHEEL_DISTANCE_MM = 287.0
 ROBOT_RADIUS_MM = 150.0
 
-MAP_W_MM = 4000
-MAP_H_MM = 2000
+MAP_SCALE = 2.0
+MAP_W_MM = int(4000 * MAP_SCALE)
+MAP_H_MM = int(2000 * MAP_SCALE)
+
+GAZEBO_UPPER_LEFT_X_M = 0.5
+GAZEBO_UPPER_LEFT_Y_M = 2.0
+GAZEBO_LOWER_LEFT_X_M = 0.5
+GAZEBO_LOWER_LEFT_Y_M = -2.0
 
 XY_RES_MM = 50
 THETA_RES_DEG = 30
 DT = 0.1
 ACTION_TIME = 1.0
 GOAL_THRESH_MM = 100.0
-DISPLAY_SCALE = 0.20
+DISPLAY_SCALE = 0.10
 
 def wrap_angle_deg(theta_deg):
     return theta_deg % 360.0
@@ -28,6 +34,16 @@ def world_to_img(x_mm, y_mm):
     px = int(round(x_mm * DISPLAY_SCALE))
     py = int(round((MAP_H_MM - y_mm) * DISPLAY_SCALE))
     return px, py
+
+def gazebo_to_planner_mm(x_gz_m, y_gz_m):
+    x_mm = (x_gz_m - GAZEBO_LOWER_LEFT_X_M) * 1000.0
+    y_mm = (y_gz_m - GAZEBO_LOWER_LEFT_Y_M) * 1000.0
+    return x_mm, y_mm
+
+def planner_mm_to_gazebo(x_mm, y_mm):
+    x_gz_m = GAZEBO_LOWER_LEFT_X_M + x_mm / 1000.0
+    y_gz_m = GAZEBO_LOWER_LEFT_Y_M + y_mm / 1000.0
+    return x_gz_m, y_gz_m
 
 def point_in_rect(x, y, xmin, xmax, ymin, ymax):
     return xmin <= x <= xmax and ymin <= y <= ymax
@@ -42,16 +58,16 @@ def point_in_rotated_rect(x, y, cx, cy, length, width, angle_deg):
 
 def build_obstacle_check(clearance_mm):
     inflate = ROBOT_RADIUS_MM + clearance_mm
-    square_side = 400.0
+    square_side = 400.0 * MAP_SCALE
     squares = [
-        (420.0, 450.0, square_side),
-        (1335.0, 1550.0, square_side),
-        (2200.0, 1740.0, square_side),
+        (420.0 * MAP_SCALE, 450.0 * MAP_SCALE, square_side),
+        (1335.0 * MAP_SCALE, 1550.0 * MAP_SCALE, square_side),
+        (2200.0 * MAP_SCALE, 1740.0 * MAP_SCALE, square_side),
     ]
     bars = [
-        (800.0, 1400.0, 1400.0, 50.0, -60.0),
-        (1700.0, 500.0, 1200.0, 50.0, 60.0),
-        (2925.0, 1275.0, 1450.0, 50.0, 90.0),
+        (800.0 * MAP_SCALE, 1400.0 * MAP_SCALE, 1400.0 * MAP_SCALE, 50.0 * MAP_SCALE, -60.0),
+        (1700.0 * MAP_SCALE, 500.0 * MAP_SCALE, 1200.0 * MAP_SCALE, 50.0 * MAP_SCALE, 60.0),
+        (2925.0 * MAP_SCALE, 1275.0 * MAP_SCALE, 1450.0 * MAP_SCALE, 50.0 * MAP_SCALE, 90.0),
     ]
 
     def obstacle_free(x, y):
@@ -59,12 +75,10 @@ def build_obstacle_check(clearance_mm):
             return False
         if y < inflate or y > (MAP_H_MM - inflate):
             return False
-
         for cx, cy, side in squares:
             half = side / 2.0 + inflate
             if point_in_rect(x, y, cx - half, cx + half, cy - half, cy + half):
                 return False
-
         for cx, cy, length, width, angle_deg in bars:
             if point_in_rotated_rect(
                 x,
@@ -76,7 +90,6 @@ def build_obstacle_check(clearance_mm):
                 angle_deg,
             ):
                 return False
-
         return True
 
     return obstacle_free, squares, bars, inflate
@@ -148,6 +161,8 @@ def make_base_map(squares, bars, inflate):
         box = np.round(box).astype(np.int32).reshape((-1, 1, 2))
         cv2.fillPoly(img, [box], (0, 0, 0))
 
+    endline_x = int(MAP_W_MM * DISPLAY_SCALE)
+    cv2.line(img, (endline_x - 3, 0), (endline_x - 3, h - 1), (255, 0, 0), 3)
     return img
 
 def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate):
@@ -161,7 +176,6 @@ def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate):
         (rpm1, rpm2),
         (rpm2, rpm1),
     ]
-
     open_list = []
     parent = {}
     parent_action = {}
@@ -175,7 +189,6 @@ def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate):
     while open_list:
         _, g, current = heapq.heappop(open_list)
         cidx = get_index(current)
-
         if cidx in visited:
             continue
         visited.add(cidx)
@@ -190,7 +203,6 @@ def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate):
 
             nxt, edge_cost, curve_points = result
             nidx = get_index(nxt)
-
             if nidx in visited:
                 continue
 
@@ -200,7 +212,6 @@ def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate):
                 parent[nidx] = cidx
                 parent_action[nidx] = (ul, ur, curve_points, nxt)
                 heapq.heappush(open_list, (new_g + heuristic(nxt, goal), new_g, nxt))
-
                 for i in range(len(curve_points) - 1):
                     p1 = world_to_img(curve_points[i][0], curve_points[i][1])
                     p2 = world_to_img(curve_points[i + 1][0], curve_points[i + 1][1])
@@ -228,49 +239,82 @@ def draw_final_path(img, start, goal, path_actions):
             p1 = world_to_img(curve_points[i][0], curve_points[i][1])
             p2 = world_to_img(curve_points[i + 1][0], curve_points[i + 1][1])
             cv2.line(out, p1, p2, (0, 0, 255), 2)
+
     sp = world_to_img(start[0], start[1])
     gp = world_to_img(goal[0], goal[1])
     cv2.circle(out, sp, 6, (0, 255, 0), -1)
     cv2.circle(out, gp, 6, (255, 0, 0), -1)
+    arrow_len = 200.0
+    hx = start[0] + arrow_len * math.cos(math.radians(start[2]))
+    hy = start[1] + arrow_len * math.sin(math.radians(start[2]))
+    hp = world_to_img(hx, hy)
+    cv2.arrowedLine(out, sp, hp, (0, 128, 0), 2)
     return out
 
-def get_float(prompt):
+def get_float(prompt, default=None):
     while True:
+        raw = input(prompt).strip()
+        if raw == "" and default is not None:
+            return float(default)
         try:
-            return float(input(prompt))
+            return float(raw)
         except ValueError:
             print("Invalid number. Try again.")
 
+def print_gazebo_alignment_summary():
+    print("\n=== Gazebo-aligned 2x planner ===")
+    print(f"Planner map size: {MAP_W_MM} mm x {MAP_H_MM} mm  ({MAP_W_MM/1000:.1f} m x {MAP_H_MM/1000:.1f} m)")
+    print("Gazebo map corners assumed:")
+    print("  upper-left  = (0.5,  2.0) m")
+    print("  lower-left  = (0.5, -2.0) m")
+    print("  upper-right = (8.5,  2.0) m")
+    print("  lower-right = (8.5, -2.0) m")
+    print("Robot spawn given by user: (0.5, 0.0) m")
+    print("This corresponds to planner start position: (0 mm, 2000 mm)")
+    print("Heading convention: 0 deg = +x (right), 90 deg = +y (up)\n")
+
 def get_inputs():
-    print("\nEnter all map coordinates in mm and angles in degrees.\n")
-    sx = get_float("Start x (mm): ")
-    sy = get_float("Start y (mm): ")
-    st = get_float("Start theta (deg): ")
-    gx = get_float("Goal x (mm): ")
-    gy = get_float("Goal y (mm): ")
-    gt = get_float("Goal theta (deg, can be 0 if unused): ")
+    print_gazebo_alignment_summary()
+    print("Enter START / GOAL in GAZEBO METERS and heading in DEGREES.\n")
+    sx_gz = get_float("Start x in Gazebo (m) [default 0.5]: ", default=0.5)
+    sy_gz = get_float("Start y in Gazebo (m) [default 0.0]: ", default=0.0)
+    st = get_float("Start theta (deg) [default 0]: ", default=0.0)
+    gx_gz = get_float("Goal x in Gazebo (m): ")
+    gy_gz = get_float("Goal y in Gazebo (m): ")
+    gt = get_float("Goal theta (deg, can be 0 if unused) [default 0]: ", default=0.0)
     rpm1 = get_float("RPM1: ")
     rpm2 = get_float("RPM2: ")
     clearance = get_float("Clearance (mm): ")
-    return (sx, sy, wrap_angle_deg(st)), (gx, gy, wrap_angle_deg(gt)), rpm1, rpm2, clearance
+    execute_flag = input("Execute in Gazebo after planning? (y/n): ").strip().lower() == 'y'
+    sx_mm, sy_mm = gazebo_to_planner_mm(sx_gz, sy_gz)
+    gx_mm, gy_mm = gazebo_to_planner_mm(gx_gz, gy_gz)
+    start = (sx_mm, sy_mm, wrap_angle_deg(st))
+    goal = (gx_mm, gy_mm, wrap_angle_deg(gt))
+    return start, goal, rpm1, rpm2, clearance, execute_flag
 
 def main():
-    start, goal, rpm1, rpm2, clearance = get_inputs()
+    start, goal, rpm1, rpm2, clearance, execute_flag = get_inputs()
     obstacle_free, squares, bars, inflate = build_obstacle_check(clearance)
 
     while not obstacle_free(start[0], start[1]):
         print("Start is in obstacle space or invalid. Enter again.")
-        sx = get_float("Start x (mm): ")
-        sy = get_float("Start y (mm): ")
+        sx_gz = get_float("Start x in Gazebo (m): ")
+        sy_gz = get_float("Start y in Gazebo (m): ")
         st = get_float("Start theta (deg): ")
-        start = (sx, sy, wrap_angle_deg(st))
+        sx_mm, sy_mm = gazebo_to_planner_mm(sx_gz, sy_gz)
+        start = (sx_mm, sy_mm, wrap_angle_deg(st))
 
     while not obstacle_free(goal[0], goal[1]):
         print("Goal is in obstacle space or invalid. Enter again.")
-        gx = get_float("Goal x (mm): ")
-        gy = get_float("Goal y (mm): ")
+        gx_gz = get_float("Goal x in Gazebo (m): ")
+        gy_gz = get_float("Goal y in Gazebo (m): ")
         gt = get_float("Goal theta (deg, can be 0 if unused): ")
-        goal = (gx, gy, wrap_angle_deg(gt))
+        gx_mm, gy_mm = gazebo_to_planner_mm(gx_gz, gy_gz)
+        goal = (gx_mm, gy_mm, wrap_angle_deg(gt))
+
+    print("\nConverted planner-frame coordinates (mm):")
+    print(f"  Start: ({start[0]:.1f}, {start[1]:.1f}, {start[2]:.1f} deg)")
+    print(f"  Goal : ({goal[0]:.1f}, {goal[1]:.1f}, {goal[2]:.1f} deg)")
 
     parent, parent_action, final_node, exploration_img = astar(
         start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate
@@ -285,8 +329,11 @@ def main():
 
     path_actions = reconstruct_path(start, final_node, parent, parent_action)
     print("\nPath found.")
-    print(f"Final reached node: {final_node}")
+    print(f"Final reached node in planner frame: {final_node}")
+    fx_gz, fy_gz = planner_mm_to_gazebo(final_node[0], final_node[1])
+    print(f"Final reached node in Gazebo frame: ({fx_gz:.3f}, {fy_gz:.3f}, {final_node[2]:.2f} deg)")
     print(f"Number of action primitives: {len(path_actions)}")
+
     final_img = draw_final_path(exploration_img, start, goal, path_actions)
     cv2.imshow("Optimal Path", final_img)
     cv2.waitKey(0)
