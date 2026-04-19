@@ -79,16 +79,13 @@ def build_obstacle_check(clearance_mm):
             return False
         if y < inflate or y > (MAP_H_MM - inflate):
             return False
-
         if x < inflate:
             if y < left_gap_ymin + inflate or y > left_gap_ymax - inflate:
                 return False
-
         for cx, cy, side in squares:
             half = side / 2.0 + inflate
             if point_in_rect(x, y, cx - half, cx + half, cy - half, cy + half):
                 return False
-
         for cx, cy, length, width, angle_deg in bars:
             if point_in_rotated_rect(
                 x,
@@ -100,7 +97,6 @@ def build_obstacle_check(clearance_mm):
                 angle_deg,
             ):
                 return False
-
         return True
 
     return obstacle_free, squares, bars, inflate, (left_gap_ymin, left_gap_ymax)
@@ -121,10 +117,8 @@ def move_with_rpms(node, ul_rpm, ur_rpm, obstacle_free):
         x += 0.5 * WHEEL_RADIUS_MM * (ul + ur) * math.cos(theta) * DT
         y += 0.5 * WHEEL_RADIUS_MM * (ul + ur) * math.sin(theta) * DT
         theta += (WHEEL_RADIUS_MM / WHEEL_DISTANCE_MM) * (ur - ul) * DT
-
         if not obstacle_free(x, y):
             return None
-
         distance += np.hypot(x - x_prev, y - y_prev)
         curve_points.append((x, y))
 
@@ -222,12 +216,10 @@ def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate, left_g
             result = move_with_rpms(current, ul, ur, obstacle_free)
             if result is None:
                 continue
-
             nxt, edge_cost, curve_points = result
             nidx = get_index(nxt)
             if nidx in visited:
                 continue
-
             new_g = g + edge_cost
             if (nidx not in cost_to_come) or (new_g < cost_to_come[nidx]):
                 cost_to_come[nidx] = new_g
@@ -261,7 +253,6 @@ def draw_final_path(img, start, goal, path_actions):
             p1 = world_to_img(curve_points[i][0], curve_points[i][1])
             p2 = world_to_img(curve_points[i + 1][0], curve_points[i + 1][1])
             cv2.line(out, p1, p2, (0, 0, 255), 2)
-
     sp = world_to_img(start[0], start[1])
     gp = world_to_img(goal[0], goal[1])
     cv2.circle(out, sp, 6, (0, 255, 0), -1)
@@ -272,6 +263,57 @@ def draw_final_path(img, start, goal, path_actions):
     hp = world_to_img(hx, hy)
     cv2.arrowedLine(out, sp, hp, (0, 128, 0), 2)
     return out
+
+def execute_in_gazebo(path_actions):
+    import rclpy
+    from rclpy.node import Node
+    from geometry_msgs.msg import Twist
+
+    class CmdVelPublisher(Node):
+        def __init__(self):
+            super().__init__('astar_path_executor')
+            self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
+    wheel_radius_m = 0.033
+    wheel_distance_m = 0.287
+
+    rclpy.init()
+    node = CmdVelPublisher()
+
+    try:
+        print("execute_in_gazebo called")
+        print("num actions:", len(path_actions))
+        time.sleep(1.0)
+
+        for i, action in enumerate(path_actions):
+            ul_rpm = action[0]
+            ur_rpm = action[1]
+            ul = ul_rpm * 2.0 * math.pi / 60.0
+            ur = ur_rpm * 2.0 * math.pi / 60.0
+
+            msg = Twist()
+            msg.linear.x = (wheel_radius_m / 2.0) * (ul + ur)
+            msg.angular.z = (wheel_radius_m / wheel_distance_m) * (ur - ul)
+
+            print(
+                f"Publishing action {i}: UL={ul_rpm}, UR={ur_rpm}, "
+                f"v={msg.linear.x:.3f}, w={msg.angular.z:.3f}"
+            )
+
+            t0 = time.time()
+            while time.time() - t0 < ACTION_TIME:
+                node.pub.publish(msg)
+                rclpy.spin_once(node, timeout_sec=0.0)
+                time.sleep(0.05)
+
+            node.pub.publish(Twist())
+            time.sleep(0.05)
+
+        node.pub.publish(Twist())
+
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 def get_float(prompt, default=None):
     while True:
@@ -361,6 +403,9 @@ def main():
     cv2.imshow("Optimal Path", final_img)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+
+    if execute_flag:
+        execute_in_gazebo(path_actions)
 
 if __name__ == "__main__":
     main()
