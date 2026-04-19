@@ -18,8 +18,8 @@ GAZEBO_LOWER_LEFT_X_M = 0.5
 GAZEBO_LOWER_LEFT_Y_M = -2.0
 
 XY_RES_MM = 50
-THETA_RES_DEG = 30
-DT = 0.1
+THETA_RES_DEG = 15
+DT = 0.05
 ACTION_TIME = 1.0
 GOAL_THRESH_MM = 100.0
 DISPLAY_SCALE = 0.10
@@ -188,9 +188,9 @@ def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate, left_g
         (rpm1, rpm1),
         (0, rpm2),
         (rpm2, 0),
-        (rpm2, rpm2),
-        (rpm1, rpm2),
         (rpm2, rpm1),
+        (rpm1, rpm2),
+        (rpm2, rpm2),
     ]
     open_list = []
     parent = {}
