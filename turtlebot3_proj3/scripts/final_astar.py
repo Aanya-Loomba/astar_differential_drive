@@ -69,16 +69,26 @@ def build_obstacle_check(clearance_mm):
         (1700.0 * MAP_SCALE, 500.0 * MAP_SCALE, 1200.0 * MAP_SCALE, 50.0 * MAP_SCALE, 60.0),
         (2925.0 * MAP_SCALE, 1275.0 * MAP_SCALE, 1450.0 * MAP_SCALE, 50.0 * MAP_SCALE, 90.0),
     ]
+    left_gap_height_mm = 1000.0
+    left_gap_center_y_mm = 2000.0
+    left_gap_ymin = left_gap_center_y_mm - left_gap_height_mm / 2.0
+    left_gap_ymax = left_gap_center_y_mm + left_gap_height_mm / 2.0
 
     def obstacle_free(x, y):
-        if x < inflate or x > (MAP_W_MM - inflate):
+        if x > (MAP_W_MM - inflate):
             return False
         if y < inflate or y > (MAP_H_MM - inflate):
             return False
+
+        if x < inflate:
+            if y < left_gap_ymin + inflate or y > left_gap_ymax - inflate:
+                return False
+
         for cx, cy, side in squares:
             half = side / 2.0 + inflate
             if point_in_rect(x, y, cx - half, cx + half, cy - half, cy + half):
                 return False
+
         for cx, cy, length, width, angle_deg in bars:
             if point_in_rotated_rect(
                 x,
@@ -90,9 +100,10 @@ def build_obstacle_check(clearance_mm):
                 angle_deg,
             ):
                 return False
+
         return True
 
-    return obstacle_free, squares, bars, inflate
+    return obstacle_free, squares, bars, inflate, (left_gap_ymin, left_gap_ymax)
 
 def move_with_rpms(node, ul_rpm, ur_rpm, obstacle_free):
     x, y, theta_deg = node
@@ -132,11 +143,22 @@ def heuristic(node, goal):
 def reached_goal(node, goal):
     return np.hypot(node[0] - goal[0], node[1] - goal[1]) <= GOAL_THRESH_MM
 
-def make_base_map(squares, bars, inflate):
+def make_base_map(squares, bars, inflate, left_gap=None):
     w = int(MAP_W_MM * DISPLAY_SCALE)
     h = int(MAP_H_MM * DISPLAY_SCALE)
     img = np.ones((h, w, 3), dtype=np.uint8) * 255
-    cv2.rectangle(img, (0, 0), (w - 1, h - 1), (0, 0, 0), 2)
+
+    if left_gap is None:
+        cv2.rectangle(img, (0, 0), (w - 1, h - 1), (0, 0, 0), 2)
+    else:
+        gap_ymin, gap_ymax = left_gap
+        cv2.line(img, (0, 0), (w - 1, 0), (0, 0, 0), 2)
+        cv2.line(img, (0, h - 1), (w - 1, h - 1), (0, 0, 0), 2)
+        cv2.line(img, (w - 1, 0), (w - 1, h - 1), (0, 0, 0), 2)
+        p_top = world_to_img(0.0, gap_ymax)
+        p_bot = world_to_img(0.0, gap_ymin)
+        cv2.line(img, (0, 0), (0, p_top[1]), (0, 0, 0), 2)
+        cv2.line(img, (0, p_bot[1]), (0, h - 1), (0, 0, 0), 2)
 
     for cx, cy, side in squares:
         half = side / 2.0 + inflate
@@ -165,7 +187,7 @@ def make_base_map(squares, bars, inflate):
     cv2.line(img, (endline_x - 3, 0), (endline_x - 3, h - 1), (255, 0, 0), 3)
     return img
 
-def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate):
+def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate, left_gap=None):
     actions = [
         (0, rpm1),
         (rpm1, 0),
@@ -184,7 +206,7 @@ def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate):
 
     cost_to_come[get_index(start)] = 0.0
     heapq.heappush(open_list, (heuristic(start, goal), 0.0, start))
-    img = make_base_map(squares, bars, inflate)
+    img = make_base_map(squares, bars, inflate, left_gap)
 
     while open_list:
         _, g, current = heapq.heappop(open_list)
@@ -271,6 +293,7 @@ def print_gazebo_alignment_summary():
     print("  lower-right = (8.5, -2.0) m")
     print("Robot spawn given by user: (0.5, 0.0) m")
     print("This corresponds to planner start position: (0 mm, 2000 mm)")
+    print("Left wall modification: 1.0 m opening in Gazebo, centered at spawn height")
     print("Heading convention: 0 deg = +x (right), 90 deg = +y (up)\n")
 
 def get_inputs():
@@ -294,7 +317,7 @@ def get_inputs():
 
 def main():
     start, goal, rpm1, rpm2, clearance, execute_flag = get_inputs()
-    obstacle_free, squares, bars, inflate = build_obstacle_check(clearance)
+    obstacle_free, squares, bars, inflate, left_gap = build_obstacle_check(clearance)
 
     while not obstacle_free(start[0], start[1]):
         print("Start is in obstacle space or invalid. Enter again.")
@@ -317,7 +340,7 @@ def main():
     print(f"  Goal : ({goal[0]:.1f}, {goal[1]:.1f}, {goal[2]:.1f} deg)")
 
     parent, parent_action, final_node, exploration_img = astar(
-        start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate
+        start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate, left_gap
     )
 
     if final_node is None:
