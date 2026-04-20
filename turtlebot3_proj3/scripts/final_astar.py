@@ -22,10 +22,24 @@ THETA_RES_DEG = 15
 DT = 0.05
 ACTION_TIME = 1.0
 GOAL_THRESH_MM = 100.0
+
+MIN_ACTION_TIME = 0.65
+MAX_ACTION_TIME = 4.00
+STRAIGHT_DISTANCE_TARGET_M = 0.24
+ARC_DISTANCE_TARGET_M = 0.18
+ARC_ANGLE_TARGET_DEG = 18.0
+PIVOT_ANGLE_TARGET_DEG = 24.0
+STRAIGHT_TIME_GAIN = 2.25
+ARC_TIME_GAIN = 1.00
+PIVOT_TIME_GAIN = 0.90
+
 DISPLAY_SCALE = 0.10
 
 def wrap_angle_deg(theta_deg):
     return theta_deg % 360.0
+
+def wrap_angle_rad(theta_rad):
+    return theta_rad % (2.0 * math.pi)
 
 def rpm_to_rad_per_sec(rpm):
     return rpm * 2.0 * math.pi / 60.0
@@ -44,6 +58,38 @@ def planner_mm_to_gazebo(x_mm, y_mm):
     x_gz_m = GAZEBO_LOWER_LEFT_X_M + x_mm / 1000.0
     y_gz_m = GAZEBO_LOWER_LEFT_Y_M + y_mm / 1000.0
     return x_gz_m, y_gz_m
+
+def clamp(value, lo, hi):
+    return max(lo, min(hi, value))
+
+def primitive_action_time(ul_rpm, ur_rpm):
+    wheel_radius_m = 0.033
+    wheel_distance_m = 0.287
+    wl = rpm_to_rad_per_sec(ul_rpm)
+    wr = rpm_to_rad_per_sec(ur_rpm)
+    v = (wheel_radius_m / 2.0) * (wl + wr)
+    w = (wheel_radius_m / wheel_distance_m) * (wr - wl)
+    abs_v = abs(v)
+    abs_w = abs(w)
+
+    if abs_w < 1e-6:
+        if abs_v < 1e-6:
+            return MIN_ACTION_TIME
+        t = STRAIGHT_DISTANCE_TARGET_M / abs_v
+        t *= STRAIGHT_TIME_GAIN
+        return clamp(t, MIN_ACTION_TIME, MAX_ACTION_TIME)
+
+    if abs(ul_rpm) < 1e-6 or abs(ur_rpm) < 1e-6:
+        target_angle_rad = math.radians(PIVOT_ANGLE_TARGET_DEG)
+        t = target_angle_rad / abs_w
+        t *= PIVOT_TIME_GAIN
+        return clamp(t, MIN_ACTION_TIME, MAX_ACTION_TIME)
+
+    target_dist_time = ARC_DISTANCE_TARGET_M / max(abs_v, 1e-6)
+    target_angle_time = math.radians(ARC_ANGLE_TARGET_DEG) / max(abs_w, 1e-6)
+    t = max(target_dist_time, target_angle_time)
+    t *= ARC_TIME_GAIN
+    return clamp(t, MIN_ACTION_TIME, MAX_ACTION_TIME)
 
 def point_in_rect(x, y, xmin, xmax, ymin, ymax):
     return xmin <= x <= xmax and ymin <= y <= ymax
@@ -109,8 +155,9 @@ def move_with_rpms(node, ul_rpm, ur_rpm, obstacle_free):
     t = 0.0
     distance = 0.0
     curve_points = [(x, y)]
+    action_time = primitive_action_time(ul_rpm, ur_rpm)
 
-    while t < ACTION_TIME:
+    while t < action_time:
         t += DT
         x_prev = x
         y_prev = y
@@ -122,7 +169,8 @@ def move_with_rpms(node, ul_rpm, ur_rpm, obstacle_free):
         distance += np.hypot(x - x_prev, y - y_prev)
         curve_points.append((x, y))
 
-    return (x, y, wrap_angle_deg(math.degrees(theta))), distance, curve_points
+    theta_deg_new = wrap_angle_deg(math.degrees(theta))
+    return (x, y, theta_deg_new), distance, curve_points
 
 def get_index(node):
     x, y, theta_deg = node
@@ -198,7 +246,8 @@ def astar(start, goal, rpm1, rpm2, obstacle_free, squares, bars, inflate, left_g
     cost_to_come = {}
     visited = set()
 
-    cost_to_come[get_index(start)] = 0.0
+    start_idx = get_index(start)
+    cost_to_come[start_idx] = 0.0
     heapq.heappush(open_list, (heuristic(start, goal), 0.0, start))
     img = make_base_map(squares, bars, inflate, left_gap)
 
@@ -295,19 +344,21 @@ def execute_in_gazebo(path_actions):
             msg.linear.x = (wheel_radius_m / 2.0) * (ul + ur)
             msg.angular.z = (wheel_radius_m / wheel_distance_m) * (ur - ul)
 
+            action_time = primitive_action_time(ul_rpm, ur_rpm)
+
             print(
                 f"Publishing action {i}: UL={ul_rpm}, UR={ur_rpm}, "
-                f"v={msg.linear.x:.3f}, w={msg.angular.z:.3f}"
+                f"v={msg.linear.x:.3f}, w={msg.angular.z:.3f}, T={action_time:.2f}s"
             )
 
             t0 = time.time()
-            while time.time() - t0 < ACTION_TIME:
+            while time.time() - t0 < action_time:
                 node.pub.publish(msg)
                 rclpy.spin_once(node, timeout_sec=0.0)
-                time.sleep(0.05)
+                time.sleep(0.01)
 
             node.pub.publish(Twist())
-            time.sleep(0.05)
+            time.sleep(0.01)
 
         node.pub.publish(Twist())
 
@@ -336,7 +387,8 @@ def print_gazebo_alignment_summary():
     print("Robot spawn given by user: (0.5, 0.0) m")
     print("This corresponds to planner start position: (0 mm, 2000 mm)")
     print("Left wall modification: 1.0 m opening in Gazebo, centered at spawn height")
-    print("Heading convention: 0 deg = +x (right), 90 deg = +y (up)\n")
+    print("Heading convention: 0 deg = +x (right), 90 deg = +y (up)")
+    print("Open-loop timing: adaptive per action, using wheel kinematics\n")
 
 def get_inputs():
     print_gazebo_alignment_summary()
@@ -398,6 +450,16 @@ def main():
     fx_gz, fy_gz = planner_mm_to_gazebo(final_node[0], final_node[1])
     print(f"Final reached node in Gazebo frame: ({fx_gz:.3f}, {fy_gz:.3f}, {final_node[2]:.2f} deg)")
     print(f"Number of action primitives: {len(path_actions)}")
+
+    print("\nAction sequence [UL, UR] RPM:")
+    for i, (ul, ur, _, nxt) in enumerate(path_actions):
+        nx_gz, ny_gz = planner_mm_to_gazebo(nxt[0], nxt[1])
+        action_time = primitive_action_time(ul, ur)
+        print(
+            f"{i:03d}: [{ul:.2f}, {ur:.2f}]  T={action_time:.2f}s -> "
+            f"planner=({nxt[0]:.2f}, {nxt[1]:.2f}, {nxt[2]:.2f} deg), "
+            f"gazebo=({nx_gz:.3f}, {ny_gz:.3f}, {nxt[2]:.2f} deg)"
+        )
 
     final_img = draw_final_path(exploration_img, start, goal, path_actions)
     cv2.imshow("Optimal Path", final_img)
